@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QStackedWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QTextEdit,
-    QFileDialog, QProgressBar, QGroupBox,
+    QFileDialog, QProgressBar, QGroupBox, QScrollArea,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QSplitter, QFrame
 )
@@ -577,6 +577,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("BEED — Sinyal Sınıflandırma")
         self.setMinimumSize(900, 680)
+        self.is_dark_mode = False
+        self.theme_buttons = []
         self._apply_style()
 
         self.main_stack = QStackedWidget()
@@ -591,76 +593,396 @@ class MainWindow(QMainWindow):
 
     # ── Stil ──────────────────────────────────
     def _apply_style(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background: #1e1e2e; color: #cdd6f4; }
+        light_style = """
+            QMainWindow, QWidget {
+                background: #f4f6fb;
+                color: #1f2a37;
+                font-family: 'Segoe UI';
+                font-size: 10pt;
+            }
             QPushButton {
-                background: #89b4fa; color: #1e1e2e;
-                border: none; padding: 8px 18px;
-                border-radius: 6px; font-weight: bold;
+                background: #3b82f6;
+                color: #ffffff;
+                border: 1px solid #3b82f6;
+                padding: 9px 16px;
+                border-radius: 8px;
+                font-weight: 600;
             }
-            QPushButton:hover { background: #b4befe; }
-            QPushButton:disabled { background: #45475a; color: #6c7086; }
+            QPushButton:hover {
+                background: #2563eb;
+                border: 1px solid #2563eb;
+            }
+            QPushButton:pressed { background: #1d4ed8; }
+            QPushButton:disabled {
+                background: #cbd5e1;
+                color: #64748b;
+                border: 1px solid #cbd5e1;
+            }
             QLineEdit {
-                background: #313244; border: 1px solid #45475a;
-                border-radius: 4px; padding: 5px 8px; color: #cdd6f4;
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 8px 10px;
+                color: #0f172a;
             }
-            QLineEdit:focus { border: 1px solid #89b4fa; }
-            QLabel#screen_title { font-size: 28px; font-weight: bold; color: #89b4fa; }
-            QPushButton#home_button { font-size: 20px; padding: 14px; }
-            QPushButton#mode_button { font-size: 14px; padding: 10px; }
+            QLineEdit:focus { border: 1px solid #3b82f6; }
+            QLabel#screen_title {
+                font-size: 26px;
+                font-weight: 700;
+                color: #0f172a;
+            }
+            QLabel#screen_subtitle {
+                color: #64748b;
+                font-size: 11pt;
+            }
+            QPushButton#home_button {
+                font-size: 18px;
+                padding: 14px;
+                border-radius: 10px;
+            }
+            QPushButton#mode_button {
+                font-size: 13px;
+                padding: 10px;
+                border-radius: 8px;
+            }
+            QPushButton#mode_button:checked {
+                background: #2563eb;
+                border: 1px solid #2563eb;
+                color: #ffffff;
+            }
+            QPushButton#back_button {
+                min-width: 92px;
+                background: #e2e8f0;
+                color: #1e293b;
+                border: 1px solid #cbd5e1;
+            }
+            QPushButton#back_button:hover { background: #cbd5e1; }
+            QPushButton#theme_button {
+                min-width: 110px;
+                background: #0f172a;
+                color: #ffffff;
+                border: 1px solid #0f172a;
+            }
+            QPushButton#theme_button:hover { background: #1e293b; }
             QTextEdit {
-                background: #181825; border: 1px solid #313244;
-                border-radius: 6px; font-family: Consolas, monospace; font-size: 12px;
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+                padding: 6px;
             }
             QGroupBox {
-                border: 1px solid #45475a; border-radius: 8px;
-                margin-top: 10px; padding: 10px;
-                font-weight: bold; color: #89b4fa;
+                border: 1px solid #dbe2ea;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 12px;
+                font-weight: 700;
+                color: #334155;
+                background: #ffffff;
             }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+            }
             QProgressBar {
-                background: #313244; border-radius: 6px; height: 18px;
-                text-align: center; color: #1e1e2e;
+                background: #e2e8f0;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                height: 20px;
+                text-align: center;
+                color: #0f172a;
+                font-weight: 700;
             }
-            QProgressBar::chunk { background: #a6e3a1; border-radius: 6px; }
+            QProgressBar::chunk {
+                background: #22c55e;
+                border-radius: 7px;
+            }
             QTableWidget {
-                background: #181825; gridline-color: #313244;
-                border: 1px solid #313244; border-radius: 6px;
+                background: #ffffff;
+                gridline-color: #e2e8f0;
+                border: 1px solid #dbe2ea;
+                border-radius: 8px;
+                color: #0f172a;
             }
-            QHeaderView::section { background: #313244; color: #89b4fa; padding: 5px; }
+            QHeaderView::section {
+                background: #f1f5f9;
+                color: #334155;
+                padding: 7px;
+                border: none;
+            }
             QLabel#result_label {
-                font-size: 18px; font-weight: bold;
-                background: #313244; border-radius: 8px; padding: 10px;
+                font-size: 18px;
+                font-weight: 700;
+                background: #f1f5f9;
+                border-radius: 8px;
+                padding: 10px;
             }
-        """)
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 4px 2px 4px 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                min-height: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94a3b8;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 10px;
+                margin: 2px 4px 2px 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #cbd5e1;
+                min-width: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #94a3b8;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {
+                background: transparent;
+                width: 0px;
+            }
+        """
+
+        dark_style = """
+            QMainWindow, QWidget {
+                background: #0f172a;
+                color: #dbe3f0;
+                font-family: 'Segoe UI';
+                font-size: 10pt;
+            }
+            QPushButton {
+                background: #3b82f6;
+                color: #ffffff;
+                border: 1px solid #3b82f6;
+                padding: 9px 16px;
+                border-radius: 8px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #2563eb;
+                border: 1px solid #2563eb;
+            }
+            QPushButton:pressed { background: #1d4ed8; }
+            QPushButton:disabled {
+                background: #334155;
+                color: #94a3b8;
+                border: 1px solid #334155;
+            }
+            QLineEdit {
+                background: #111827;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 8px 10px;
+                color: #e2e8f0;
+            }
+            QLineEdit:focus { border: 1px solid #60a5fa; }
+            QLabel#screen_title {
+                font-size: 26px;
+                font-weight: 700;
+                color: #e2e8f0;
+            }
+            QLabel#screen_subtitle {
+                color: #94a3b8;
+                font-size: 11pt;
+            }
+            QPushButton#home_button {
+                font-size: 18px;
+                padding: 14px;
+                border-radius: 10px;
+            }
+            QPushButton#mode_button {
+                font-size: 13px;
+                padding: 10px;
+                border-radius: 8px;
+            }
+            QPushButton#mode_button:checked {
+                background: #60a5fa;
+                border: 1px solid #60a5fa;
+                color: #0f172a;
+            }
+            QPushButton#back_button {
+                min-width: 92px;
+                background: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+            }
+            QPushButton#back_button:hover { background: #334155; }
+            QPushButton#theme_button {
+                min-width: 110px;
+                background: #f8fafc;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+            }
+            QPushButton#theme_button:hover { background: #e2e8f0; }
+            QTextEdit {
+                background: #111827;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+                padding: 6px;
+                color: #e2e8f0;
+            }
+            QGroupBox {
+                border: 1px solid #334155;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 12px;
+                font-weight: 700;
+                color: #cbd5e1;
+                background: #111827;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+            }
+            QProgressBar {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                height: 20px;
+                text-align: center;
+                color: #e2e8f0;
+                font-weight: 700;
+            }
+            QProgressBar::chunk {
+                background: #22c55e;
+                border-radius: 7px;
+            }
+            QTableWidget {
+                background: #111827;
+                gridline-color: #1f2937;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                color: #e2e8f0;
+            }
+            QHeaderView::section {
+                background: #1e293b;
+                color: #cbd5e1;
+                padding: 7px;
+                border: none;
+            }
+            QLabel#result_label {
+                font-size: 18px;
+                font-weight: 700;
+                background: #1e293b;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 4px 2px 4px 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #475569;
+                min-height: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #64748b;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 10px;
+                margin: 2px 4px 2px 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #475569;
+                min-width: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #64748b;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {
+                background: transparent;
+                width: 0px;
+            }
+        """
+
+        self.setStyleSheet(dark_style if self.is_dark_mode else light_style)
+        self._refresh_theme_button_texts()
+
+    def _create_theme_button(self):
+        btn = QPushButton()
+        btn.setObjectName("theme_button")
+        btn.clicked.connect(self._toggle_theme)
+        self.theme_buttons.append(btn)
+        self._refresh_theme_button_texts()
+        return btn
+
+    def _refresh_theme_button_texts(self):
+        text = "Açık Mod" if self.is_dark_mode else "Koyu Mod"
+        for btn in self.theme_buttons:
+            btn.setText(text)
+
+    def _toggle_theme(self):
+        self.is_dark_mode = not self.is_dark_mode
+        self._apply_style()
 
     def _build_home_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(20)
+        layout.setContentsMargins(140, 70, 140, 70)
+        layout.setSpacing(14)
+
+        top_row = QHBoxLayout()
+        top_row.addStretch()
+        top_row.addWidget(self._create_theme_button())
+        layout.addLayout(top_row)
 
         title = QLabel("BEED — Ana Menü")
         title.setObjectName("screen_title")
         title.setAlignment(Qt.AlignCenter)
 
-        subtitle = QLabel("Lütfen bir işlem seçin")
+        subtitle = QLabel("Sinyal sınıflandırma paneli")
+        subtitle.setObjectName("screen_subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
 
-        train_btn = QPushButton("🔧  Model Eğit")
+        train_btn = QPushButton("Model Eğit")
         train_btn.setObjectName("home_button")
-        train_btn.setFixedHeight(70)
+        train_btn.setFixedHeight(72)
         train_btn.clicked.connect(self._open_train_page)
 
-        predict_btn = QPushButton("🔍  Tahmin")
+        predict_btn = QPushButton("Tahmin")
         predict_btn.setObjectName("home_button")
-        predict_btn.setFixedHeight(70)
+        predict_btn.setFixedHeight(72)
         predict_btn.clicked.connect(self._open_predict_page)
 
         layout.addStretch()
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addSpacing(16)
+        layout.addSpacing(24)
         layout.addWidget(train_btn)
         layout.addWidget(predict_btn)
         layout.addStretch()
@@ -669,11 +991,12 @@ class MainWindow(QMainWindow):
     def _build_train_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        layout.setContentsMargins(18, 14, 18, 14)
 
         top_row = QHBoxLayout()
         back_btn = QPushButton("← Geri")
+        back_btn.setObjectName("back_button")
         back_btn.clicked.connect(self._go_home)
         title = QLabel("Model Eğitimi")
         title.setObjectName("screen_title")
@@ -681,24 +1004,37 @@ class MainWindow(QMainWindow):
         top_row.addStretch()
         top_row.addWidget(title)
         top_row.addStretch()
+        top_row.addWidget(self._create_theme_button())
         layout.addLayout(top_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
         mode_group = QGroupBox("Eğitim Yöntemi")
         ml = QHBoxLayout(mode_group)
-        self.csv_mode_btn = QPushButton("CSV ile")
+        self.csv_mode_btn = QPushButton("CSV ile Eğit")
+        self.csv_mode_btn.setCheckable(True)
         self.csv_mode_btn.setObjectName("mode_button")
         self.csv_mode_btn.clicked.connect(lambda: self._set_train_mode(0))
-        self.manual_mode_btn = QPushButton("Manuel")
+        self.manual_mode_btn = QPushButton("Manuel Veri ile Eğit")
+        self.manual_mode_btn.setCheckable(True)
         self.manual_mode_btn.setObjectName("mode_button")
         self.manual_mode_btn.clicked.connect(lambda: self._set_train_mode(1))
         ml.addWidget(self.csv_mode_btn)
         ml.addWidget(self.manual_mode_btn)
-        layout.addWidget(mode_group)
+        content_layout.addWidget(mode_group)
 
         self.train_mode_stack = QStackedWidget()
         self.train_mode_stack.addWidget(self._build_csv_train_mode())
         self.train_mode_stack.addWidget(self._build_manual_train_mode())
-        layout.addWidget(self.train_mode_stack)
+        self.train_mode_stack.setMinimumHeight(310)
+        content_layout.addWidget(self.train_mode_stack)
 
         self._set_train_mode(0)
 
@@ -707,7 +1043,7 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         cl.addWidget(self.progress_bar)
-        layout.addWidget(ctrl_group)
+        content_layout.addWidget(ctrl_group)
 
         # Sonuç tablosu
         res_group = QGroupBox("Doğruluk Sonuçları")
@@ -715,21 +1051,28 @@ class MainWindow(QMainWindow):
         self.acc_table = QTableWidget(3, 2)
         self.acc_table.setHorizontalHeaderLabels(["Model", "Accuracy"])
         self.acc_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.acc_table.setFixedHeight(110)
+        self.acc_table.setFixedHeight(145)
         self.acc_table.verticalHeader().setVisible(False)
+        self.acc_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.acc_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for i, name in enumerate(["CNN", "PCA + SVM", "CNN-LSTM"]):
             self.acc_table.setItem(i, 0, QTableWidgetItem(name))
             self.acc_table.setItem(i, 1, QTableWidgetItem("—"))
         rl.addWidget(self.acc_table)
-        layout.addWidget(res_group)
+        content_layout.addWidget(res_group)
 
         # Log alanı
         log_group = QGroupBox("Eğitim Logu")
         ll = QVBoxLayout(log_group)
         self.log_edit = QTextEdit()
         self.log_edit.setReadOnly(True)
+        self.log_edit.setMinimumHeight(110)
         ll.addWidget(self.log_edit)
-        layout.addWidget(log_group, stretch=1)
+        content_layout.addWidget(log_group)
+
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
 
         return w
 
@@ -763,13 +1106,15 @@ class MainWindow(QMainWindow):
 
         manual_group = QGroupBox("Manuel Veri ile Eğit")
         grid = QGridLayout(manual_group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
 
         self.manual_x_inputs = []
         for i in range(16):
             lbl = QLabel(f"X{i+1}:")
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             edit = QLineEdit()
-            edit.setPlaceholderText("0")
+            edit.setPlaceholderText(f"X{i+1}")
             self.manual_x_inputs.append(edit)
             grid.addWidget(lbl, i // 4, (i % 4) * 2)
             grid.addWidget(edit, i // 4, (i % 4) * 2 + 1)
@@ -780,10 +1125,11 @@ class MainWindow(QMainWindow):
         self.manual_y_input.setPlaceholderText("Sınıf etiketi (örn: 0,1,2...)")
         grid.addWidget(y_lbl, 4, 0)
         grid.addWidget(self.manual_y_input, 4, 1, 1, 7)
+        manual_group.setMinimumHeight(220)
 
         layout.addWidget(manual_group)
 
-        self.manual_train_btn = QPushButton("▶  Manuel Veriyi Mevcut Modelin Üstüne Eğit")
+        self.manual_train_btn = QPushButton("Manuel Veriyi Mevcut Modele Ekle ve Eğit")
         self.manual_train_btn.setFixedHeight(42)
         self.manual_train_btn.clicked.connect(self._start_manual_incremental_training)
         layout.addWidget(self.manual_train_btn)
@@ -799,6 +1145,7 @@ class MainWindow(QMainWindow):
 
         top_row = QHBoxLayout()
         back_btn = QPushButton("← Geri")
+        back_btn.setObjectName("back_button")
         back_btn.clicked.connect(self._go_home)
         title = QLabel("Tahmin")
         title.setObjectName("screen_title")
@@ -806,6 +1153,7 @@ class MainWindow(QMainWindow):
         top_row.addStretch()
         top_row.addWidget(title)
         top_row.addStretch()
+        top_row.addWidget(self._create_theme_button())
         layout.addLayout(top_row)
 
         inp_group = QGroupBox("Kişi Verisini Girin  (X1 – X16)")
@@ -852,11 +1200,11 @@ class MainWindow(QMainWindow):
     def _set_train_mode(self, index):
         self.train_mode_stack.setCurrentIndex(index)
         if index == 0:
-            self.csv_mode_btn.setEnabled(False)
-            self.manual_mode_btn.setEnabled(True)
+            self.csv_mode_btn.setChecked(True)
+            self.manual_mode_btn.setChecked(False)
         else:
-            self.csv_mode_btn.setEnabled(True)
-            self.manual_mode_btn.setEnabled(False)
+            self.csv_mode_btn.setChecked(False)
+            self.manual_mode_btn.setChecked(True)
 
     def _make_result_card(self, title, color):
         frame = QFrame()
@@ -890,8 +1238,8 @@ class MainWindow(QMainWindow):
     def _set_training_buttons_enabled(self, enabled: bool):
         self.csv_train_btn.setEnabled(enabled)
         self.manual_train_btn.setEnabled(enabled)
-        self.csv_mode_btn.setEnabled(enabled and self.train_mode_stack.currentIndex() != 0)
-        self.manual_mode_btn.setEnabled(enabled and self.train_mode_stack.currentIndex() != 1)
+        self.csv_mode_btn.setEnabled(enabled)
+        self.manual_mode_btn.setEnabled(enabled)
 
     def _start_csv_incremental_training(self):
         path = self.file_path_edit.text().strip()
