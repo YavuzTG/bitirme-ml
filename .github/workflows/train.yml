@@ -1,0 +1,46 @@
+name: Remote Training
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_path:
+        description: "Dataset CSV path in repository"
+        required: false
+        default: "BEED_Data.csv"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-train.txt
+
+      - name: Train models
+        run: |
+          python train.py --data "${{ github.event.inputs.data_path || 'BEED_Data.csv' }}"
+
+      - name: Upload model bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: beed-model-bundle
+          path: |
+            model_cnn.keras
+            model_lstm.keras
+            trained_models.pkl
+            metrics.json
+          if-no-files-found: error

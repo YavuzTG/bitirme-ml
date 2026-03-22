@@ -1,8 +1,13 @@
 import sys
 import os
+import io
+import json
+import time
+import zipfile
 import numpy as np
 import pandas as pd
 import threading
+from datetime import datetime, timezone
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
@@ -165,6 +170,155 @@ class TrainWorker(QObject):
                 "lstm": lstm_acc
             })
 
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class RemoteTrainWorker(QObject):
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, owner, repo, token, workflow_file="train.yml", branch="main", data_path="BEED_Data.csv"):
+        super().__init__()
+        self.owner = owner
+        self.repo = repo
+        self.token = token
+        self.workflow_file = workflow_file
+        self.branch = branch
+        self.data_path = data_path
+
+    def _headers(self):
+        return {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    def run(self):
+        try:
+            import requests
+
+            api_base = f"https://api.github.com/repos/{self.owner}/{self.repo}"
+            started_at = datetime.now(timezone.utc)
+
+            self.log.emit("☁️ Uzak eğitim tetikleniyor (GitHub Actions)...")
+            self.progress.emit(5)
+
+            dispatch_url = f"{api_base}/actions/workflows/{self.workflow_file}/dispatches"
+            payload = {
+                "ref": self.branch,
+                "inputs": {"data_path": self.data_path},
+            }
+            dispatch_resp = requests.post(dispatch_url, headers=self._headers(), json=payload, timeout=30)
+            if dispatch_resp.status_code != 204:
+                raise RuntimeError(f"Workflow tetiklenemedi: {dispatch_resp.status_code} {dispatch_resp.text}")
+
+            self.log.emit("✅ Workflow tetiklendi. Run bilgisi bekleniyor...")
+            self.progress.emit(15)
+
+            run_id = None
+            for _ in range(30):
+                runs_url = f"{api_base}/actions/workflows/{self.workflow_file}/runs"
+                runs_resp = requests.get(
+                    runs_url,
+                    headers=self._headers(),
+                    params={"event": "workflow_dispatch", "branch": self.branch, "per_page": 20},
+                    timeout=30,
+                )
+                if runs_resp.status_code != 200:
+                    raise RuntimeError(f"Run listesi alınamadı: {runs_resp.status_code} {runs_resp.text}")
+
+                runs = runs_resp.json().get("workflow_runs", [])
+                for run in runs:
+                    created_at = run.get("created_at")
+                    if not created_at:
+                        continue
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    if created_dt >= started_at:
+                        run_id = run.get("id")
+                        break
+
+                if run_id:
+                    break
+
+                self.log.emit("⏳ Run henüz görünmedi, tekrar kontrol ediliyor...")
+                time.sleep(5)
+
+            if not run_id:
+                raise RuntimeError("Workflow run bulunamadı. GitHub Actions sekmesinden kontrol et.")
+
+            self.log.emit(f"🚀 Run başladı (ID: {run_id}). Eğitim sürüyor...")
+            self.progress.emit(25)
+
+            progress_value = 25
+            run_url = f"{api_base}/actions/runs/{run_id}"
+            while True:
+                run_resp = requests.get(run_url, headers=self._headers(), timeout=30)
+                if run_resp.status_code != 200:
+                    raise RuntimeError(f"Run durumu alınamadı: {run_resp.status_code} {run_resp.text}")
+
+                run_info = run_resp.json()
+                status = run_info.get("status")
+                conclusion = run_info.get("conclusion")
+
+                if status == "completed":
+                    if conclusion != "success":
+                        html_url = run_info.get("html_url", "")
+                        raise RuntimeError(f"Eğitim başarısız: {conclusion}. Detay: {html_url}")
+                    break
+
+                progress_value = min(progress_value + 5, 80)
+                self.progress.emit(progress_value)
+                self.log.emit(f"⏳ Workflow durumu: {status}")
+                time.sleep(10)
+
+            self.log.emit("📦 Artifact indiriliyor...")
+            self.progress.emit(85)
+
+            artifacts_url = f"{api_base}/actions/runs/{run_id}/artifacts"
+            artifacts_resp = requests.get(artifacts_url, headers=self._headers(), timeout=30)
+            if artifacts_resp.status_code != 200:
+                raise RuntimeError(f"Artifact listesi alınamadı: {artifacts_resp.status_code} {artifacts_resp.text}")
+
+            artifacts = artifacts_resp.json().get("artifacts", [])
+            artifact = next((a for a in artifacts if a.get("name") == "beed-model-bundle"), None)
+            if artifact is None:
+                if not artifacts:
+                    raise RuntimeError("Artifact bulunamadı.")
+                artifact = artifacts[0]
+
+            dl_url = artifact.get("archive_download_url")
+            if not dl_url:
+                raise RuntimeError("Artifact indirme bağlantısı alınamadı.")
+
+            dl_resp = requests.get(dl_url, headers=self._headers(), timeout=60, allow_redirects=True)
+            if dl_resp.status_code != 200:
+                raise RuntimeError(f"Artifact indirilemedi: {dl_resp.status_code} {dl_resp.text}")
+
+            wanted_files = {"model_cnn.keras", "model_lstm.keras", "trained_models.pkl", "metrics.json"}
+            with zipfile.ZipFile(io.BytesIO(dl_resp.content)) as zf:
+                for member in zf.namelist():
+                    name = os.path.basename(member)
+                    if name in wanted_files:
+                        with zf.open(member) as src, open(name, "wb") as dst:
+                            dst.write(src.read())
+
+            metrics = {"cnn": 0.0, "svm": 0.0, "lstm": 0.0}
+            if os.path.exists("metrics.json"):
+                with open("metrics.json", "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                metrics["cnn"] = float(loaded.get("cnn", 0.0))
+                metrics["svm"] = float(loaded.get("svm", 0.0))
+                metrics["lstm"] = float(loaded.get("lstm", 0.0))
+
+            self.log.emit("✅ Uzak eğitim tamamlandı ve modeller indirildi.")
+            self.progress.emit(100)
+            self.finished.emit(metrics)
+
+        except ImportError:
+            self.error.emit("'requests' paketi eksik. Kur: pip install requests")
         except Exception as e:
             self.error.emit(str(e))
 
@@ -404,17 +558,43 @@ class MainWindow(QMainWindow):
             self.file_path_edit.setText(path)
 
     def _start_training(self):
-        path = self.file_path_edit.text().strip()
-        if not path or not os.path.exists(path):
-            QMessageBox.warning(self, "Hata", "Lütfen geçerli bir CSV dosyası seçin.")
-            return
+        gh_owner = os.getenv("GH_OWNER", "").strip()
+        gh_repo = os.getenv("GH_REPO", "").strip()
+        gh_token = os.getenv("GH_TOKEN", "").strip()
 
         self.train_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.log_edit.clear()
 
         self._train_thread = QThread()
-        self._train_worker = TrainWorker(path)
+
+        if gh_owner and gh_repo and gh_token:
+            data_path = self.file_path_edit.text().strip() or "BEED_Data.csv"
+            data_path = os.path.basename(data_path)
+            workflow_file = os.getenv("GH_WORKFLOW_FILE", "train.yml").strip() or "train.yml"
+            branch = os.getenv("GH_BRANCH", "main").strip() or "main"
+
+            self.log_edit.append("☁️ Mod: Uzak eğitim (GitHub Actions)")
+            self.log_edit.append(f"📄 Veri yolu (repo içi): {data_path}")
+
+            self._train_worker = RemoteTrainWorker(
+                owner=gh_owner,
+                repo=gh_repo,
+                token=gh_token,
+                workflow_file=workflow_file,
+                branch=branch,
+                data_path=data_path,
+            )
+        else:
+            path = self.file_path_edit.text().strip()
+            if not path or not os.path.exists(path):
+                self.train_btn.setEnabled(True)
+                QMessageBox.warning(self, "Hata", "Lütfen geçerli bir CSV dosyası seçin.")
+                return
+
+            self.log_edit.append("💻 Mod: Yerel eğitim")
+            self._train_worker = TrainWorker(path)
+
         self._train_worker.moveToThread(self._train_thread)
 
         self._train_thread.started.connect(self._train_worker.run)
