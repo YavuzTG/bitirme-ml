@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QTabWidget,
+    QApplication, QMainWindow, QWidget, QStackedWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QTextEdit,
     QFileDialog, QProgressBar, QGroupBox,
@@ -169,6 +169,204 @@ class TrainWorker(QObject):
                 "svm": svm_acc,
                 "lstm": lstm_acc
             })
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+def _train_and_save_from_dataframe(df, log_emit, progress_emit):
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    from sklearn.svm import SVC
+    from sklearn.utils.class_weight import compute_class_weight
+
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import (
+        Conv1D, MaxPooling1D, Flatten, Dense,
+        Dropout, LSTM, TimeDistributed
+    )
+    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.callbacks import EarlyStopping
+
+    X = df.iloc[:, :-1].values
+    y = df.iloc[:, -1].values
+
+    log_emit(f"✅ Veri hazırlandı — X: {X.shape}, Sınıflar: {np.unique(y)}")
+    progress_emit(10)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    log_emit("✅ Train/Test bölündü ve ölçeklendi.")
+
+    class_weights = compute_class_weight(
+        "balanced", classes=np.unique(y_train), y=y_train
+    )
+    cw_dict = dict(zip(np.unique(y_train), class_weights))
+    num_classes = len(np.unique(y))
+
+    log_emit("\n🔵 CNN eğitimi başlıyor...")
+    X_tr_cnn = X_train[..., np.newaxis]
+    X_ts_cnn = X_test[..., np.newaxis]
+
+    model_cnn = Sequential([
+        Conv1D(32, 3, activation="relu", input_shape=(X_tr_cnn.shape[1], 1)),
+        MaxPooling1D(2),
+        Conv1D(64, 3, activation="relu"),
+        MaxPooling1D(2),
+        Flatten(),
+        Dense(64, activation="relu"),
+        Dropout(0.5),
+        Dense(num_classes, activation="softmax")
+    ])
+    model_cnn.compile(
+        optimizer=Adam(1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+    es = EarlyStopping(monitor="val_loss", patience=7, restore_best_weights=True)
+    model_cnn.fit(
+        X_tr_cnn, y_train,
+        validation_split=0.2, epochs=50, batch_size=32,
+        class_weight=cw_dict, callbacks=[es], verbose=0
+    )
+    cnn_acc = model_cnn.evaluate(X_ts_cnn, y_test, verbose=0)[1]
+    log_emit(f"   CNN Accuracy: {cnn_acc:.4f}")
+    progress_emit(45)
+
+    log_emit("\n🟡 PCA + SVM eğitimi başlıyor...")
+    pca = PCA(n_components=0.95)
+    X_tr_pca = pca.fit_transform(X_train)
+    X_ts_pca = pca.transform(X_test)
+    svm = SVC(kernel="rbf", C=10, gamma="scale")
+    svm.fit(X_tr_pca, y_train)
+    svm_acc = svm.score(X_ts_pca, y_test)
+    log_emit(f"   PCA+SVM Accuracy: {svm_acc:.4f}")
+    progress_emit(65)
+
+    log_emit("\n🟣 CNN-LSTM eğitimi başlıyor...")
+    timesteps = 5
+
+    def make_seq(arr, t):
+        return np.array([np.tile(r, (t, 1)) for r in arr])[..., np.newaxis]
+
+    X_tr_seq = make_seq(X_train, timesteps)
+    X_ts_seq = make_seq(X_test, timesteps)
+
+    model_lstm = Sequential([
+        TimeDistributed(
+            Conv1D(32, 3, activation="relu"),
+            input_shape=(timesteps, X_train.shape[1], 1)
+        ),
+        TimeDistributed(MaxPooling1D(2)),
+        TimeDistributed(Flatten()),
+        LSTM(64),
+        Dense(64, activation="relu"),
+        Dense(num_classes, activation="softmax")
+    ])
+    model_lstm.compile(
+        optimizer=Adam(1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+    model_lstm.fit(
+        X_tr_seq, y_train,
+        validation_split=0.2, epochs=50, batch_size=32,
+        class_weight=cw_dict, callbacks=[es], verbose=0
+    )
+    lstm_acc = model_lstm.evaluate(X_ts_seq, y_test, verbose=0)[1]
+    log_emit(f"   CNN-LSTM Accuracy: {lstm_acc:.4f}")
+    progress_emit(95)
+
+    import pickle
+    with open("trained_models.pkl", "wb") as f:
+        pickle.dump(
+            {
+                "scaler": scaler,
+                "pca": pca,
+                "svm": svm,
+                "num_classes": num_classes,
+                "TIMESTEPS": timesteps,
+            },
+            f,
+        )
+    model_cnn.save("model_cnn.keras")
+    model_lstm.save("model_lstm.keras")
+
+    log_emit("\n✅ Modeller kaydedildi.")
+    progress_emit(100)
+    return {
+        "cnn": float(cnn_acc),
+        "svm": float(svm_acc),
+        "lstm": float(lstm_acc),
+    }
+
+
+class IncrementalTrainWorker(QObject):
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, mode, base_csv_path="BEED_Data.csv", add_csv_path=None, manual_x=None, manual_y=None):
+        super().__init__()
+        self.mode = mode
+        self.base_csv_path = base_csv_path
+        self.add_csv_path = add_csv_path
+        self.manual_x = manual_x or []
+        self.manual_y = manual_y
+
+    def run(self):
+        try:
+            self.log.emit("📂 Mevcut eğitim verisi hazırlanıyor...")
+
+            base_exists = os.path.exists(self.base_csv_path)
+            if base_exists:
+                base_df = pd.read_csv(self.base_csv_path)
+            else:
+                base_df = None
+
+            if self.mode == "csv":
+                if not self.add_csv_path or not os.path.exists(self.add_csv_path):
+                    raise RuntimeError("Ek eğitim CSV dosyası bulunamadı.")
+
+                add_df = pd.read_csv(self.add_csv_path)
+                self.log.emit(f"✅ Ek CSV okundu: {add_df.shape}")
+
+                if base_df is None:
+                    merged_df = add_df.copy()
+                    self.log.emit("ℹ️ Mevcut veri yoktu, sadece ek CSV ile eğitim yapılacak.")
+                else:
+                    if add_df.shape[1] != base_df.shape[1]:
+                        raise RuntimeError("Ek CSV sütun sayısı mevcut veriyle uyuşmuyor.")
+                    add_df.columns = base_df.columns
+                    merged_df = pd.concat([base_df, add_df], ignore_index=True)
+
+            elif self.mode == "manual":
+                if base_df is None:
+                    raise RuntimeError("Manuel ekleme için önce BEED_Data.csv mevcut olmalı.")
+
+                expected_x_count = base_df.shape[1] - 1
+                if len(self.manual_x) != expected_x_count:
+                    raise RuntimeError(f"Manuel X sayısı {expected_x_count} olmalı.")
+
+                row = list(self.manual_x) + [self.manual_y]
+                add_df = pd.DataFrame([row], columns=base_df.columns)
+                merged_df = pd.concat([base_df, add_df], ignore_index=True)
+                self.log.emit("✅ Manuel satır mevcut veriye eklendi.")
+            else:
+                raise RuntimeError("Geçersiz eğitim modu.")
+
+            merged_df.to_csv(self.base_csv_path, index=False)
+            self.log.emit(f"💾 Güncel veri kaydedildi: {self.base_csv_path}  (Toplam: {len(merged_df)})")
+            self.progress.emit(8)
+
+            accs = _train_and_save_from_dataframe(merged_df, self.log.emit, self.progress.emit)
+            self.finished.emit(accs)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -378,24 +576,23 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BEED — Sinyal Sınıflandırma")
-        self.setMinimumSize(820, 620)
+        self.setMinimumSize(900, 680)
         self._apply_style()
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_train_tab(), "🔧  Model Eğitimi")
-        tabs.addTab(self._build_predict_tab(), "🔍  Tahmin")
-        self.setCentralWidget(tabs)
+        self.main_stack = QStackedWidget()
+        self.home_page = self._build_home_page()
+        self.train_page = self._build_train_page()
+        self.predict_page = self._build_predict_page()
+
+        self.main_stack.addWidget(self.home_page)
+        self.main_stack.addWidget(self.train_page)
+        self.main_stack.addWidget(self.predict_page)
+        self.setCentralWidget(self.main_stack)
 
     # ── Stil ──────────────────────────────────
     def _apply_style(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #1e1e2e; color: #cdd6f4; }
-            QTabWidget::pane { border: 1px solid #313244; background: #1e1e2e; }
-            QTabBar::tab {
-                background: #313244; color: #cdd6f4;
-                padding: 8px 20px; border-radius: 4px 4px 0 0;
-            }
-            QTabBar::tab:selected { background: #89b4fa; color: #1e1e2e; font-weight: bold; }
             QPushButton {
                 background: #89b4fa; color: #1e1e2e;
                 border: none; padding: 8px 18px;
@@ -408,6 +605,9 @@ class MainWindow(QMainWindow):
                 border-radius: 4px; padding: 5px 8px; color: #cdd6f4;
             }
             QLineEdit:focus { border: 1px solid #89b4fa; }
+            QLabel#screen_title { font-size: 28px; font-weight: bold; color: #89b4fa; }
+            QPushButton#home_button { font-size: 20px; padding: 14px; }
+            QPushButton#mode_button { font-size: 14px; padding: 10px; }
             QTextEdit {
                 background: #181825; border: 1px solid #313244;
                 border-radius: 6px; font-family: Consolas, monospace; font-size: 12px;
@@ -434,34 +634,78 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    # ── Tab 1: Eğitim ─────────────────────────
-    def _build_train_tab(self):
+    def _build_home_page(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+
+        title = QLabel("BEED — Ana Menü")
+        title.setObjectName("screen_title")
+        title.setAlignment(Qt.AlignCenter)
+
+        subtitle = QLabel("Lütfen bir işlem seçin")
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        train_btn = QPushButton("🔧  Model Eğit")
+        train_btn.setObjectName("home_button")
+        train_btn.setFixedHeight(70)
+        train_btn.clicked.connect(self._open_train_page)
+
+        predict_btn = QPushButton("🔍  Tahmin")
+        predict_btn.setObjectName("home_button")
+        predict_btn.setFixedHeight(70)
+        predict_btn.clicked.connect(self._open_predict_page)
+
+        layout.addStretch()
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(16)
+        layout.addWidget(train_btn)
+        layout.addWidget(predict_btn)
+        layout.addStretch()
+        return w
+
+    def _build_train_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # Dosya seçimi
-        file_group = QGroupBox("Veri Dosyası")
-        fl = QHBoxLayout(file_group)
-        self.file_path_edit = QLineEdit()
-        self.file_path_edit.setPlaceholderText("CSV dosyasını seçin...")
-        self.file_path_edit.setReadOnly(True)
-        browse_btn = QPushButton("📁 Gözat")
-        browse_btn.clicked.connect(self._browse_csv)
-        fl.addWidget(self.file_path_edit)
-        fl.addWidget(browse_btn)
-        layout.addWidget(file_group)
+        top_row = QHBoxLayout()
+        back_btn = QPushButton("← Geri")
+        back_btn.clicked.connect(self._go_home)
+        title = QLabel("Model Eğitimi")
+        title.setObjectName("screen_title")
+        top_row.addWidget(back_btn)
+        top_row.addStretch()
+        top_row.addWidget(title)
+        top_row.addStretch()
+        layout.addLayout(top_row)
 
-        # Eğit butonu + progress
-        ctrl_group = QGroupBox("Eğitim")
+        mode_group = QGroupBox("Eğitim Yöntemi")
+        ml = QHBoxLayout(mode_group)
+        self.csv_mode_btn = QPushButton("CSV ile")
+        self.csv_mode_btn.setObjectName("mode_button")
+        self.csv_mode_btn.clicked.connect(lambda: self._set_train_mode(0))
+        self.manual_mode_btn = QPushButton("Manuel")
+        self.manual_mode_btn.setObjectName("mode_button")
+        self.manual_mode_btn.clicked.connect(lambda: self._set_train_mode(1))
+        ml.addWidget(self.csv_mode_btn)
+        ml.addWidget(self.manual_mode_btn)
+        layout.addWidget(mode_group)
+
+        self.train_mode_stack = QStackedWidget()
+        self.train_mode_stack.addWidget(self._build_csv_train_mode())
+        self.train_mode_stack.addWidget(self._build_manual_train_mode())
+        layout.addWidget(self.train_mode_stack)
+
+        self._set_train_mode(0)
+
+        ctrl_group = QGroupBox("Eğitim Durumu")
         cl = QVBoxLayout(ctrl_group)
-        self.train_btn = QPushButton("▶  Modelleri Eğit")
-        self.train_btn.setFixedHeight(42)
-        self.train_btn.clicked.connect(self._start_training)
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        cl.addWidget(self.train_btn)
         cl.addWidget(self.progress_bar)
         layout.addWidget(ctrl_group)
 
@@ -489,12 +733,80 @@ class MainWindow(QMainWindow):
 
         return w
 
-    # ── Tab 2: Tahmin ─────────────────────────
-    def _build_predict_tab(self):
+    def _build_csv_train_mode(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+
+        file_group = QGroupBox("CSV ile Eğit")
+        fl = QHBoxLayout(file_group)
+        self.file_path_edit = QLineEdit()
+        self.file_path_edit.setPlaceholderText("Eklenecek CSV dosyasını seçin...")
+        self.file_path_edit.setReadOnly(True)
+        browse_btn = QPushButton("📁 Gözat")
+        browse_btn.clicked.connect(self._browse_csv)
+        fl.addWidget(self.file_path_edit)
+        fl.addWidget(browse_btn)
+        layout.addWidget(file_group)
+
+        self.csv_train_btn = QPushButton("▶  CSV Verisini Mevcut Modelin Üstüne Eğit")
+        self.csv_train_btn.setFixedHeight(42)
+        self.csv_train_btn.clicked.connect(self._start_csv_incremental_training)
+        layout.addWidget(self.csv_train_btn)
+
+        return page
+
+    def _build_manual_train_mode(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+
+        manual_group = QGroupBox("Manuel Veri ile Eğit")
+        grid = QGridLayout(manual_group)
+
+        self.manual_x_inputs = []
+        for i in range(16):
+            lbl = QLabel(f"X{i+1}:")
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            edit = QLineEdit()
+            edit.setPlaceholderText("0")
+            self.manual_x_inputs.append(edit)
+            grid.addWidget(lbl, i // 4, (i % 4) * 2)
+            grid.addWidget(edit, i // 4, (i % 4) * 2 + 1)
+
+        y_lbl = QLabel("Y:")
+        y_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.manual_y_input = QLineEdit()
+        self.manual_y_input.setPlaceholderText("Sınıf etiketi (örn: 0,1,2...)")
+        grid.addWidget(y_lbl, 4, 0)
+        grid.addWidget(self.manual_y_input, 4, 1, 1, 7)
+
+        layout.addWidget(manual_group)
+
+        self.manual_train_btn = QPushButton("▶  Manuel Veriyi Mevcut Modelin Üstüne Eğit")
+        self.manual_train_btn.setFixedHeight(42)
+        self.manual_train_btn.clicked.connect(self._start_manual_incremental_training)
+        layout.addWidget(self.manual_train_btn)
+
+        return page
+
+    # ── Tahmin ─────────────────────────
+    def _build_predict_page(self):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
+
+        top_row = QHBoxLayout()
+        back_btn = QPushButton("← Geri")
+        back_btn.clicked.connect(self._go_home)
+        title = QLabel("Tahmin")
+        title.setObjectName("screen_title")
+        top_row.addWidget(back_btn)
+        top_row.addStretch()
+        top_row.addWidget(title)
+        top_row.addStretch()
+        layout.addLayout(top_row)
 
         inp_group = QGroupBox("Kişi Verisini Girin  (X1 – X16)")
         grid = QGridLayout(inp_group)
@@ -528,6 +840,24 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return w
 
+    def _open_train_page(self):
+        self.main_stack.setCurrentWidget(self.train_page)
+
+    def _open_predict_page(self):
+        self.main_stack.setCurrentWidget(self.predict_page)
+
+    def _go_home(self):
+        self.main_stack.setCurrentWidget(self.home_page)
+
+    def _set_train_mode(self, index):
+        self.train_mode_stack.setCurrentIndex(index)
+        if index == 0:
+            self.csv_mode_btn.setEnabled(False)
+            self.manual_mode_btn.setEnabled(True)
+        else:
+            self.csv_mode_btn.setEnabled(True)
+            self.manual_mode_btn.setEnabled(False)
+
     def _make_result_card(self, title, color):
         frame = QFrame()
         frame.setStyleSheet(f"""
@@ -557,44 +887,65 @@ class MainWindow(QMainWindow):
         if path:
             self.file_path_edit.setText(path)
 
-    def _start_training(self):
-        gh_owner = os.getenv("GH_OWNER", "").strip()
-        gh_repo = os.getenv("GH_REPO", "").strip()
-        gh_token = os.getenv("GH_TOKEN", "").strip()
+    def _set_training_buttons_enabled(self, enabled: bool):
+        self.csv_train_btn.setEnabled(enabled)
+        self.manual_train_btn.setEnabled(enabled)
+        self.csv_mode_btn.setEnabled(enabled and self.train_mode_stack.currentIndex() != 0)
+        self.manual_mode_btn.setEnabled(enabled and self.train_mode_stack.currentIndex() != 1)
 
-        self.train_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.log_edit.clear()
+    def _start_csv_incremental_training(self):
+        path = self.file_path_edit.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "Hata", "Lütfen geçerli bir CSV dosyası seçin.")
+            return
 
-        self._train_thread = QThread()
+        worker = IncrementalTrainWorker(
+            mode="csv",
+            base_csv_path="BEED_Data.csv",
+            add_csv_path=path,
+        )
+        self._launch_train_worker(worker, "📦 Mod: CSV ile üstüne eğitim")
 
-        if gh_owner and gh_repo and gh_token:
-            data_path = self.file_path_edit.text().strip() or "BEED_Data.csv"
-            data_path = os.path.basename(data_path)
-            workflow_file = os.getenv("GH_WORKFLOW_FILE", "train.yml").strip() or "train.yml"
-            branch = os.getenv("GH_BRANCH", "main").strip() or "main"
-
-            self.log_edit.append("☁️ Mod: Uzak eğitim (GitHub Actions)")
-            self.log_edit.append(f"📄 Veri yolu (repo içi): {data_path}")
-
-            self._train_worker = RemoteTrainWorker(
-                owner=gh_owner,
-                repo=gh_repo,
-                token=gh_token,
-                workflow_file=workflow_file,
-                branch=branch,
-                data_path=data_path,
-            )
-        else:
-            path = self.file_path_edit.text().strip()
-            if not path or not os.path.exists(path):
-                self.train_btn.setEnabled(True)
-                QMessageBox.warning(self, "Hata", "Lütfen geçerli bir CSV dosyası seçin.")
+    def _start_manual_incremental_training(self):
+        x_vals = []
+        for i, edit in enumerate(self.manual_x_inputs):
+            txt = edit.text().strip()
+            if txt == "":
+                QMessageBox.warning(self, "Eksik Veri", f"X{i+1} boş bırakılamaz.")
+                return
+            try:
+                x_vals.append(float(txt))
+            except ValueError:
+                QMessageBox.warning(self, "Geçersiz Değer", f"X{i+1} sayısal olmalıdır.")
                 return
 
-            self.log_edit.append("💻 Mod: Yerel eğitim")
-            self._train_worker = TrainWorker(path)
+        y_txt = self.manual_y_input.text().strip()
+        if y_txt == "":
+            QMessageBox.warning(self, "Eksik Veri", "Y değeri boş bırakılamaz.")
+            return
+        try:
+            y_val = int(float(y_txt))
+        except ValueError:
+            QMessageBox.warning(self, "Geçersiz Değer", "Y değeri sayısal olmalıdır.")
+            return
 
+        worker = IncrementalTrainWorker(
+            mode="manual",
+            base_csv_path="BEED_Data.csv",
+            manual_x=x_vals,
+            manual_y=y_val,
+        )
+        self._launch_train_worker(worker, "✍️ Mod: Manuel veri ile üstüne eğitim")
+
+    def _launch_train_worker(self, worker, start_message):
+        self._set_training_buttons_enabled(False)
+
+        self.progress_bar.setValue(0)
+        self.log_edit.clear()
+        self.log_edit.append(start_message)
+
+        self._train_thread = QThread()
+        self._train_worker = worker
         self._train_worker.moveToThread(self._train_thread)
 
         self._train_thread.started.connect(self._train_worker.run)
@@ -604,7 +955,7 @@ class MainWindow(QMainWindow):
         self._train_worker.error.connect(self._on_train_error)
         self._train_worker.finished.connect(self._train_thread.quit)
         self._train_worker.error.connect(self._train_thread.quit)
-        self._train_thread.finished.connect(lambda: self.train_btn.setEnabled(True))
+        self._train_thread.finished.connect(lambda: self._set_training_buttons_enabled(True))
 
         self._train_thread.start()
 
