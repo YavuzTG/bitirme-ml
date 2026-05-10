@@ -1,0 +1,7 @@
+{
+  "cnn": 0.793749988079071,
+  "svm": 0.72125,
+  "lstm": 0.8762500286102295,
+  "duration_seconds": 68.9,
+  "data_path": "BEED_Data.csv"
+}

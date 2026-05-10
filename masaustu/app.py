@@ -20,6 +20,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QColor, QPalette
 
+# Firebase Authentication
+from auth_widgets import LoginDialog
+from firestore_handler import FirestoreHandler
+from ml_service import ModelService
+
 # ─────────────────────────────────────────────
 #  ML arka plan iş parçacığı
 # ─────────────────────────────────────────────
@@ -75,6 +80,7 @@ class TrainWorker(QObject):
             )
             cw_dict = dict(zip(np.unique(y_train), class_weights))
             num_classes = len(np.unique(y))
+            classes = np.unique(y)
 
             # ── MODEL 1: CNN ──
             self.log.emit("\n🔵 CNN eğitimi başlıyor...")
@@ -155,7 +161,8 @@ class TrainWorker(QObject):
             import pickle
             save = {
                 "scaler": scaler, "pca": pca, "svm": svm,
-                "num_classes": num_classes, "TIMESTEPS": TIMESTEPS
+                "num_classes": num_classes, "TIMESTEPS": TIMESTEPS,
+                "classes": classes.tolist()
             }
             with open("trained_models.pkl", "wb") as f:
                 pickle.dump(save, f)
@@ -208,6 +215,7 @@ def _train_and_save_from_dataframe(df, log_emit, progress_emit):
     )
     cw_dict = dict(zip(np.unique(y_train), class_weights))
     num_classes = len(np.unique(y))
+    classes = np.unique(y)
 
     log_emit("\n🔵 CNN eğitimi başlıyor...")
     X_tr_cnn = X_train[..., np.newaxis]
@@ -291,6 +299,7 @@ def _train_and_save_from_dataframe(df, log_emit, progress_emit):
                 "svm": svm,
                 "num_classes": num_classes,
                 "TIMESTEPS": timesteps,
+                "classes": classes.tolist(),
             },
             f,
         )
@@ -528,40 +537,16 @@ class PredictWorker(QObject):
     def __init__(self, features: list):
         super().__init__()
         self.features = features
+        self._service = ModelService()
 
     def run(self):
         try:
-            import pickle
-            from tensorflow.keras.models import load_model
-
-            with open("trained_models.pkl", "rb") as f:
-                obj = pickle.load(f)
-            scaler     = obj["scaler"]
-            pca        = obj["pca"]
-            svm        = obj["svm"]
-            TIMESTEPS  = obj["TIMESTEPS"]
-
-            x = np.array(self.features).reshape(1, -1)
-            x_scaled = scaler.transform(x)
-
-            # CNN
-            model_cnn  = load_model("model_cnn.keras")
-            x_cnn      = x_scaled[..., np.newaxis]
-            pred_cnn   = int(np.argmax(model_cnn.predict(x_cnn, verbose=0)))
-
-            # SVM
-            x_pca      = pca.transform(x_scaled)
-            pred_svm   = int(svm.predict(x_pca)[0])
-
-            # CNN-LSTM
-            model_lstm = load_model("model_lstm.keras")
-            x_seq      = np.tile(x_scaled, (TIMESTEPS, 1))[np.newaxis, ..., np.newaxis]
-            pred_lstm  = int(np.argmax(model_lstm.predict(x_seq, verbose=0)))
+            predictions = self._service.predict(self.features)
 
             self.finished.emit({
-                "cnn": pred_cnn,
-                "svm": pred_svm,
-                "lstm": pred_lstm
+                "cnn": int(predictions["cnn"]["predicted_class_index"]),
+                "svm": int(predictions["svm"]["predicted_class_index"]),
+                "lstm": int(predictions["lstm"]["predicted_class_index"]),
             })
         except FileNotFoundError:
             self.error.emit("Eğitilmiş model bulunamadı!\nLütfen önce 'Model Eğitimi' sekmesinden bir model eğitin.")
@@ -579,6 +564,18 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 680)
         self.is_dark_mode = False
         self.theme_buttons = []
+        
+        # Firebase Kullanıcı Bilgileri
+        self.user_email = None
+        self.is_admin = False
+        
+        # Giriş Dialogu
+        self._show_login_dialog()
+        
+        if not self.user_email:
+            # Kullanıcı çıkış yaptığı için uygulamayı kapat
+            sys.exit(0)
+        
         self._apply_style()
 
         self.main_stack = QStackedWidget()
@@ -590,8 +587,59 @@ class MainWindow(QMainWindow):
         self.main_stack.addWidget(self.train_page)
         self.main_stack.addWidget(self.predict_page)
         self.setCentralWidget(self.main_stack)
+        self._set_initial_page_by_role()
 
-    # ── Stil ──────────────────────────────────
+    # ── Firebase Giriş ──────────────────────
+    def _show_login_dialog(self):
+        """Firebase login dialog'unu göster"""
+        login_dialog = LoginDialog(self)
+        login_dialog.login_success.connect(self._on_login_success)
+        login_dialog.exec_()
+    
+    def _on_login_success(self, email, is_admin):
+        """Giriş başarılı olduğunda"""
+        self.user_email = email
+        self.is_admin = is_admin
+        print(f"✅ {email} giriş yaptı (Admin: {is_admin})")
+        
+        # Kullanıcı bilgisini Firestore'a kaydet
+        FirestoreHandler.save_user_info(email, is_admin)
+
+    def _set_initial_page_by_role(self):
+        if self.is_admin:
+            self.main_stack.setCurrentWidget(self.home_page)
+        else:
+            self.main_stack.setCurrentWidget(self.predict_page)
+
+    def _rebuild_home_page(self):
+        old_home = self.home_page
+        idx = self.main_stack.indexOf(old_home)
+        if idx != -1:
+            self.main_stack.removeWidget(old_home)
+        self.home_page = self._build_home_page()
+        self.main_stack.insertWidget(0, self.home_page)
+        old_home.deleteLater()
+    
+    def _logout(self):
+        """Çıkış yap"""
+        reply = QMessageBox.question(
+            self, 
+            "Çıkış", 
+            "Çıkış yapmak istediğinize emin misiniz?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.user_email = None
+            self.is_admin = False
+            self.hide()
+            # Giriş dialogunu yeniden göster
+            self._show_login_dialog()
+            if self.user_email:
+                self._rebuild_home_page()
+                self._set_initial_page_by_role()
+                self.show()
+            else:
+                sys.exit(0)
     def _apply_style(self):
         light_style = """
             QMainWindow, QWidget {
@@ -957,7 +1005,23 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
 
         top_row = QHBoxLayout()
+        
+        # Kullanıcı Bilgisi
+        user_info = QLabel(f"👤 {self.user_email} {'(Admin)' if self.is_admin else '(Kullanıcı)'}")
+        user_info.setAlignment(Qt.AlignLeft)
+        user_info.setStyleSheet("font-size: 10pt; color: #64748b;")
+        top_row.addWidget(user_info)
+        
         top_row.addStretch()
+        
+        # Çıkış Butonu
+        logout_btn = QPushButton("Çıkış")
+        logout_btn.setObjectName("theme_button")
+        logout_btn.clicked.connect(self._logout)
+        logout_btn.setFixedWidth(80)
+        top_row.addWidget(logout_btn)
+        
+        # Tema Değiştir
         top_row.addWidget(self._create_theme_button())
         layout.addLayout(top_row)
 
@@ -969,22 +1033,25 @@ class MainWindow(QMainWindow):
         subtitle.setObjectName("screen_subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
 
-        train_btn = QPushButton("Model Eğit")
-        train_btn.setObjectName("home_button")
-        train_btn.setFixedHeight(72)
-        train_btn.clicked.connect(self._open_train_page)
+        layout.addStretch()
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(24)
+
+        # Admin ise eğitim butonu göster
+        if self.is_admin:
+            train_btn = QPushButton("Model Eğit")
+            train_btn.setObjectName("home_button")
+            train_btn.setFixedHeight(72)
+            train_btn.clicked.connect(self._open_train_page)
+            layout.addWidget(train_btn)
 
         predict_btn = QPushButton("Tahmin")
         predict_btn.setObjectName("home_button")
         predict_btn.setFixedHeight(72)
         predict_btn.clicked.connect(self._open_predict_page)
-
-        layout.addStretch()
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addSpacing(24)
-        layout.addWidget(train_btn)
         layout.addWidget(predict_btn)
+        
         layout.addStretch()
         return w
 
@@ -1189,6 +1256,11 @@ class MainWindow(QMainWindow):
         return w
 
     def _open_train_page(self):
+        # Admin kontrol
+        if not self.is_admin:
+            QMessageBox.warning(self, "Erişim Engellendi", 
+                              "Model eğitimi sadece admin kullanıcılar tarafından yapılabilir.")
+            return
         self.main_stack.setCurrentWidget(self.train_page)
 
     def _open_predict_page(self):
@@ -1314,6 +1386,10 @@ class MainWindow(QMainWindow):
             item.setForeground(QColor("#a6e3a1"))
             self.acc_table.setItem(i, 1, item)
         self.log_edit.append("\n🎉 Eğitim tamamlandı!")
+        
+        # Model metadata'sını Firestore'a kaydet
+        model_name = f"Model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        FirestoreHandler.save_model_metadata(self.user_email, model_name, accs)
 
     def _on_train_error(self, msg):
         self.log_edit.append(f"\n❌ HATA: {msg}")
@@ -1353,6 +1429,10 @@ class MainWindow(QMainWindow):
         self.res_cnn[1].setText(str(preds["cnn"]))
         self.res_svm[1].setText(str(preds["svm"]))
         self.res_lstm[1].setText(str(preds["lstm"]))
+        
+        # Tahmin sonucunu Firestore'a kaydet
+        current_inputs = [float(edit.text().strip()) for edit in self.feat_inputs]
+        FirestoreHandler.save_prediction(self.user_email, "latest_model", current_inputs, preds)
 
     def _on_predict_error(self, msg):
         for _, lbl in [self.res_cnn, self.res_svm, self.res_lstm]:

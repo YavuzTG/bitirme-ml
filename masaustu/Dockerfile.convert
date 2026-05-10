@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+WORKDIR /work
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip packages
+RUN pip install --no-cache-dir pip --upgrade
+# Pin numpy to a 1.x release compatible with TF 2.10 to avoid NumPy 2.x breakage
+RUN pip install --no-cache-dir pip --upgrade
+# Use Python 3.11 so scikit-learn 1.8+ can be installed; pin compatible packages
+RUN pip install --no-cache-dir "tensorflow==2.20.0" "numpy==2.2.6" "scikit-learn==1.8.0" "joblib==1.2.0"
+
+# Copy conversion script and models
+COPY . /work
+
+CMD ["python", "masaustu/convert_to_tflite.py", "--output", "mobile_app/assets/model_cnn.tflite"]

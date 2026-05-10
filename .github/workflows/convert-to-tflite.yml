@@ -28,6 +28,19 @@ jobs:
         run: |
           python masaustu/convert_to_tflite.py --output mobile_app/assets/model_cnn.tflite
 
+      - name: List generated files (debug)
+        run: |
+          echo "Workspace files:" && ls -la
+          echo "Assets directory:" && ls -la mobile_app/assets || true
+
+      - name: Upload TFLite artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tflite-models
+          path: |
+            mobile_app/assets/model_cnn.tflite
+            mobile_app/assets/model_lstm.tflite
+
       - name: Commit and push TFLite artifacts
         run: |
           git config user.name "github-actions[bot]"

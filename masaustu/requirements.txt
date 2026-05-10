@@ -1,0 +1,11 @@
+numpy
+pandas
+scikit-learn
+tensorflow==2.15.1
+h5py
+PyQt5
+pyrebase4
+python-dotenv
+firebase-admin
+fastapi
+uvicorn
