@@ -136,24 +136,31 @@ if __name__ == "__main__":
     bundle_path = args.bundle
     out_path = args.output
 
-    print("Building Keras models with preprocessing...")
-    # CNN
-    cnn_model = build_model_with_preproc(desktop_dir, cnn_path, bundle_path)
-    # LSTM - try to find lstm model next to cnn
-    lstm_path = os.path.join(desktop_dir, "model_lstm.keras")
-    lstm_model = None
-    if os.path.exists(lstm_path):
-        lstm_model = build_lstm_with_preproc(desktop_dir, lstm_path, bundle_path)
+    import traceback
 
-    print("Converting to TFLite (quantize=%s)..." % args.quantize)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    # write cnn tflite
-    cnn_out = out_path
-    convert_to_tflite(cnn_model, cnn_out, quantize=args.quantize)
+    try:
+        print("Building Keras models with preprocessing...")
+        # CNN
+        cnn_model = build_model_with_preproc(desktop_dir, cnn_path, bundle_path)
+        # LSTM - try to find lstm model next to cnn
+        lstm_path = os.path.join(desktop_dir, "model_lstm.keras")
+        lstm_model = None
+        if os.path.exists(lstm_path):
+            lstm_model = build_lstm_with_preproc(desktop_dir, lstm_path, bundle_path)
 
-    # write lstm tflite if available
-    if lstm_model is not None:
-        lstm_out = os.path.join(os.path.dirname(out_path), "model_lstm.tflite")
-        convert_to_tflite(lstm_model, lstm_out, quantize=args.quantize)
+        print("Converting to TFLite (quantize=%s)..." % args.quantize)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        # write cnn tflite
+        cnn_out = out_path
+        convert_to_tflite(cnn_model, cnn_out, quantize=args.quantize)
 
-    print("Done. Test the TFLite models locally before publishing the app.")
+        # write lstm tflite if available
+        if lstm_model is not None:
+            lstm_out = os.path.join(os.path.dirname(out_path), "model_lstm.tflite")
+            convert_to_tflite(lstm_model, lstm_out, quantize=args.quantize)
+
+        print("Done. Test the TFLite models locally before publishing the app.")
+    except Exception as exc:
+        print("ERROR during conversion:")
+        traceback.print_exc()
+        raise SystemExit(1)
