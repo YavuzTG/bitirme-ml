@@ -23,7 +23,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Install numpy/h5py/scikit-learn/joblib first (binary-compat with TF)
-          pip install "numpy==1.23.5" "h5py==3.8.0" "scikit-learn==1.2.2" "joblib==1.1.0" "pandas==1.5.3"
+          pip install "numpy==1.23.5" "h5py==3.8.0" "scikit-learn==1.2.2" "joblib==1.1.1" "pandas==1.5.3"
           # Install matching TensorFlow wheel
           pip install "tensorflow==2.15.1"
           # Install remaining requirements without pulling deps that would upgrade numpy
